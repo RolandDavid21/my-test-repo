@@ -1,0 +1,207 @@
+
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+#include <stdio.h>
+#include <iostream>
+#include <cmath>
+#include <vector>
+#include <cassert>
+
+struct Vec3 {
+    float x, y, z;
+
+    __host__ __device__ Vec3() : x(0), y(0), z(0) {}
+    __host__ __device__ Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+
+    __host__ __device__ Vec3 operator+(const Vec3& other) const {
+        return Vec3(x + other.x, y + other.y, z + other.z);
+    }
+
+    __host__ __device__ Vec3 operator-(const Vec3& other) const {
+        return Vec3(x - other.x, y - other.y, z - other.z);
+    }
+
+    __host__ __device__ Vec3 operator*(float scalar) const {
+        return Vec3(x * scalar, y * scalar, z * scalar);
+    }
+
+    __host__ __device__ Vec3 operator/(float scalar) const {
+        return Vec3(x / scalar, y / scalar, z / scalar);
+    }
+
+    __host__ __device__ float dot(const Vec3& other) const {
+        return x * other.x + y * other.y + z * other.z;
+    }
+
+    __host__ __device__ Vec3 cross(const Vec3& other) const {
+        return Vec3(y * other.z - z * other.y, z * other.x - x * other.z, x * other.y - y * other.x);
+    }
+
+    __host__ __device__ float length() const {
+        return std::sqrt(x * x + y * y + z * z);
+    }
+
+    __host__ __device__ Vec3 normalize() const {
+        float len = length();
+        if (len > 0)
+            return *this / len;
+        else
+            return *this;
+    }
+};
+
+struct Ray {
+    Vec3 origin;
+    Vec3 direction;
+
+    __host__ __device__ Ray(const Vec3& origin_, const Vec3& direction_) : origin(origin_), direction(direction_) {}
+};
+
+struct Sphere {
+    Vec3 center;
+    float radius;
+    Vec3 color;
+
+    __host__ __device__ Sphere(const Vec3& center_, float radius_, const Vec3& color_) : center(center_), radius(radius_), color(color_) {}
+
+    __host__ __device__ bool intersect(const Ray& ray, float& t) const {
+        Vec3 oc = ray.origin - center;
+        float a = ray.direction.dot(ray.direction);
+        float b = 2.0f * oc.dot(ray.direction);
+        float c = oc.dot(oc) - radius * radius;
+        float discriminant = b * b - 4 * a * c;
+        if (discriminant < 0)
+            return false;
+        else {
+            float sqrtDiscriminant = std::sqrt(discriminant);
+            float t1 = (-b - sqrtDiscriminant) / (2.0f * a);
+            float t2 = (-b + sqrtDiscriminant) / (2.0f * a);
+            if (t1 > 0 || t2 > 0) {
+                t = (t1 > 0) ? t1 : t2;
+                return true;
+            }
+            else {
+                return false;
+            }
+        }
+    }
+};
+
+__host__ __device__ Vec3 trace(const Ray& ray, const Sphere* spheres, int numSpheres) {
+    const float kInfinity = std::numeric_limits<float>::infinity();
+    float tMin = kInfinity;
+    const Sphere* hitSphere = nullptr;
+
+    for (int i = 0; i < numSpheres; ++i) {
+        float t;
+        if (spheres[i].intersect(ray, t)) {
+            if (t < tMin) {
+                tMin = t;
+                hitSphere = &spheres[i];
+            }
+        }
+    }
+
+    if (hitSphere) {
+        Vec3 intersectionPoint = ray.origin + ray.direction * tMin;
+        Vec3 normal = (intersectionPoint - hitSphere->center).normalize();
+        return hitSphere->color * normal.dot(Vec3(1.0f, 1.0f, 1.0f));
+    }
+
+    return Vec3(0.0f, 0.0f, 0.0f); // Background color
+}
+
+__global__ void rayTracingKernel(Vec3* output, int width, int height, const Sphere* spheres, int numSpheres,
+    const Vec3& cameraPosition, const Vec3& lightDirection) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (i >= width || j >= height)
+        return;
+
+    float u = float(i) / float(width);
+    float v = float(j) / float(height);
+
+    Vec3 direction(u - 0.5f, v - 0.5f, 1.0f);
+    Ray ray(cameraPosition, direction.normalize());
+
+    int pixelIndex = j * width + i;
+    output[pixelIndex] = trace(ray, spheres, numSpheres);
+
+    // Apply simple shading based on the dot product of the surface normal and light direction
+    float shading = output[pixelIndex].dot(lightDirection);
+    output[pixelIndex] = output[pixelIndex] * shading;
+}
+
+void rayTracingCPU(Vec3* output, int width, int height, const Sphere* spheres, int numSpheres,
+    const Vec3& cameraPosition, const Vec3& lightDirection) {
+    for (int j = height - 1; j >= 0; --j) {
+        for (int i = 0; i < width; ++i) {
+            float u = float(i) / float(width);
+            float v = float(j) / float(height);
+
+            Vec3 direction(u - 0.5f, v - 0.5f, 1.0f);
+            Ray ray(cameraPosition, direction.normalize());
+
+            int pixelIndex = j * width + i;
+            output[pixelIndex] = trace(ray, spheres, numSpheres);
+
+            // Apply simple shading based on the dot product of the surface normal and light direction
+            float shading = output[pixelIndex].dot(lightDirection);
+            output[pixelIndex] = output[pixelIndex] * shading;
+        }
+    }
+}
+
+void printImage(const Vec3* image, int width, int height) {
+    for (int j = height - 1; j >= 0; --j) {
+        for (int i = 0; i < width; ++i) {
+            int pixelIndex = j * width + i;
+            int r = static_cast<int>(255.99f * image[pixelIndex].x);
+            int g = static_cast<int>(255.99f * image[pixelIndex].y);
+            int b = static_cast<int>(255.99f * image[pixelIndex].z);
+            std::cout << r << " " << g << " " << b << std::endl;
+        }
+    }
+}
+
+int main() {
+    const int imageWidth = 800;
+    const int imageHeight = 400;
+
+    const Vec3 cameraPosition(0.0f, 0.0f, -5.0f);
+    const Vec3 lightDirection(0.0f, 0.0f, -1.0f);
+
+    const Sphere spheres[] = {
+        Sphere(Vec3(0.0f, 0.0f, 0.0f), 1.0f, Vec3(1.0f, 0.0f, 0.0f)),  // Red sphere
+        Sphere(Vec3(2.0f, 0.0f, 0.0f), 1.0f, Vec3(0.0f, 1.0f, 0.0f)),  // Green sphere
+        Sphere(Vec3(-2.0f, 0.0f, 0.0f), 1.0f, Vec3(0.0f, 0.0f, 1.0f))  // Blue sphere
+    };
+    const int numSpheres = sizeof(spheres) / sizeof(Sphere);
+
+    // CPU version
+    std::cout << "Rendering (CPU)..." << std::endl;
+    std::vector<Vec3> cpuImage(imageWidth * imageHeight);
+    rayTracingCPU(cpuImage.data(), imageWidth, imageHeight, spheres, numSpheres, cameraPosition, lightDirection);
+    printImage(cpuImage.data(), imageWidth, imageHeight);
+
+    // CUDA version
+    std::cout << "Rendering (CUDA)..." << std::endl;
+    Vec3* gpuImage;
+    cudaMalloc(&gpuImage, imageWidth * imageHeight * sizeof(Vec3));
+    cudaMemcpy(gpuImage, cpuImage.data(), imageWidth * imageHeight * sizeof(Vec3), cudaMemcpyHostToDevice);
+
+    dim3 blockSize(16, 16);
+    dim3 gridSize((imageWidth + blockSize.x - 1) / blockSize.x, (imageHeight + blockSize.y - 1) / blockSize.y);
+
+    rayTracingKernel << <gridSize, blockSize >> > (gpuImage, imageWidth, imageHeight, spheres, numSpheres, cameraPosition, lightDirection);
+
+    cudaDeviceSynchronize();
+    cudaMemcpy(cpuImage.data(), gpuImage, imageWidth * imageHeight * sizeof(Vec3), cudaMemcpyDeviceToHost);
+    printImage(cpuImage.data(), imageWidth, imageHeight);
+
+    cudaFree(gpuImage);
+
+    return 0;
+}
