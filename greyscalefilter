@@ -1,0 +1,105 @@
+#include <iostream>
+#include <opencv2/opencv.hpp>
+#include <chrono>
+
+// CUDA kernel for parallel grayscale conversion
+__global__ void convertToGrayParallel(unsigned char* input, unsigned char* output, int width, int height) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (col < width && row < height) {
+        int grayOffset = row * width + col;
+        int rgbOffset = grayOffset * 3;
+
+        unsigned char b = input[rgbOffset];
+        unsigned char g = input[rgbOffset + 1];
+        unsigned char r = input[rgbOffset + 2];
+
+        output[grayOffset] = 0.299f * r + 0.587f * g + 0.114f * b;
+    }
+}
+
+// Procedural method for grayscale conversion
+void convertToGrayProcedural(unsigned char* input, unsigned char* output, int width, int height) {
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+            int grayOffset = row * width + col;
+            int rgbOffset = grayOffset * 3;
+
+            unsigned char b = input[rgbOffset];
+            unsigned char g = input[rgbOffset + 1];
+            unsigned char r = input[rgbOffset + 2];
+
+            output[grayOffset] = 0.299f * r + 0.587f * g + 0.114f * b;
+        }
+    }
+}
+
+int main() {
+    std::string imagePath = "image.jpg";  // Path to the input image
+
+    // Read the input image using OpenCV
+    cv::Mat inputImage = cv::imread(imagePath, cv::IMREAD_COLOR);
+    if (inputImage.empty()) {
+        std::cout << "Failed to read the image." << std::endl;
+        return -1;
+    }
+
+    int width = inputImage.cols;
+    int height = inputImage.rows;
+
+    // Allocate memory for input and output images on the host (CPU)
+    unsigned char* hostInputImage = inputImage.data;
+    unsigned char* hostOutputImage = new unsigned char[width * height];
+
+    // Allocate memory for input and output images on the device (GPU)
+    unsigned char* deviceInputImage;
+    unsigned char* deviceOutputImage;
+
+    cudaMalloc((void**)&deviceInputImage, width * height * 3 * sizeof(unsigned char));
+    cudaMalloc((void**)&deviceOutputImage, width * height * sizeof(unsigned char));
+
+    // Copy input image from host to device
+    cudaMemcpy(deviceInputImage, hostInputImage, width * height * 3 * sizeof(unsigned char), cudaMemcpyHostToDevice);
+
+    // Calculate the block and grid dimensions for parallel processing
+    dim3 blockSize(16, 16);
+    dim3 gridSize((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
+
+    // Perform grayscale conversion using procedural method
+    auto startProcedural = std::chrono::high_resolution_clock::now();
+    convertToGrayProcedural(hostInputImage, hostOutputImage, width, height);
+    auto endProcedural = std::chrono::high_resolution_clock::now();
+    auto durationProcedural = std::chrono::duration_cast<std::chrono::milliseconds>(endProcedural - startProcedural);
+
+    std::cout << "Procedural method:\n";
+    std::cout << "Time taken: " << durationProcedural.count() << " ms\n";
+
+    // Perform grayscale conversion using parallel method
+    auto startParallel = std::chrono::high_resolution_clock::now();
+    convertToGrayParallel << <gridSize, blockSize >> > (deviceInputImage, deviceOutputImage, width, height);
+    cudaDeviceSynchronize();
+    auto endParallel = std::chrono::high_resolution_clock::now();
+    auto durationParallel = std::chrono::duration_cast<std::chrono::milliseconds>(endParallel - startParallel);
+
+    std::cout << "\nParallel method:\n";
+    std::cout << "Time taken: " << durationParallel.count() << " ms\n";
+
+    // Copy output image from device to host
+    cudaMemcpy(hostOutputImage, deviceOutputImage, width * height * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+
+    // Create a new OpenCV Mat for the output image
+    cv::Mat outputImage(height, width, CV_8UC1, hostOutputImage);
+
+    // Display the input and output images
+    cv::imshow("Input Image", inputImage);
+    cv::imshow("Output Image", outputImage);
+    cv::waitKey(0);
+
+    // Cleanup
+    delete[] hostOutputImage;
+    cudaFree(deviceInputImage);
+    cudaFree(deviceOutputImage);
+
+    return 0;
+}
