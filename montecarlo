@@ -1,0 +1,98 @@
+#include <iostream>
+#include <random>
+#include <chrono>
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+
+#include <stdio.h>// CUDA kernel for parallel computation
+__global__ void computePiParallel(unsigned int* count, unsigned int* iterations) {
+    unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int stride = blockDim.x * gridDim.x;
+
+    unsigned int local_count = 0;
+    unsigned int num_iterations = *iterations;
+
+    // Random number generator setup
+    unsigned int seed = index;
+    std::default_random_engine rng(seed);
+    std::uniform_real_distribution<float> dist(0.0, 1.0);
+
+    // Monte Carlo estimation
+    for (unsigned int i = index; i < num_iterations; i += stride) {
+        float x = dist(rng);
+        float y = dist(rng);
+        float distance = x * x + y * y;
+
+        if (distance <= 1.0f)
+            local_count++;
+    }
+
+    atomicAdd(count, local_count);
+}
+
+// Procedural method for computing PI
+float computePiProcedural(unsigned int iterations) {
+    unsigned int count = 0;
+
+    // Random number generator setup
+    unsigned int seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    std::default_random_engine rng(seed);
+    std::uniform_real_distribution<float> dist(0.0, 1.0);
+
+    // Monte Carlo estimation
+    for (unsigned int i = 0; i < iterations; i++) {
+        float x = dist(rng);
+        float y = dist(rng);
+        float distance = x * x + y * y;
+
+        if (distance <= 1.0f)
+            count++;
+    }
+
+    return 4.0f * static_cast<float>(count) / iterations;
+}
+
+int main() {
+    const unsigned int numIterations = 100000000;  // Total number of iterations
+
+    // Compute PI using procedural method
+    auto startProcedural = std::chrono::high_resolution_clock::now();
+    float piProcedural = computePiProcedural(numIterations);
+    auto endProcedural = std::chrono::high_resolution_clock::now();
+    auto durationProcedural = std::chrono::duration_cast<std::chrono::milliseconds>(endProcedural - startProcedural);
+
+    std::cout << "Procedural method:\n";
+    std::cout << "PI = " << piProcedural << std::endl;
+    std::cout << "Time taken: " << durationProcedural.count() << " ms\n";
+
+    // Compute PI using parallel method
+    unsigned int* d_count;
+    unsigned int* d_iterations;
+
+    cudaMalloc((void**)&d_count, sizeof(unsigned int));
+    cudaMalloc((void**)&d_iterations, sizeof(unsigned int));
+    cudaMemcpy(d_iterations, &numIterations, sizeof(unsigned int), cudaMemcpyHostToDevice);
+
+    const unsigned int threadsPerBlock = 256;
+    const unsigned int numBlocks = (numIterations + threadsPerBlock - 1) / threadsPerBlock;
+
+    auto startParallel = std::chrono::high_resolution_clock::now();
+    computePiParallel <<<numBlocks, threadsPerBlock>>>(d_count, d_iterations);
+    cudaDeviceSynchronize();
+    auto endParallel = std::chrono::high_resolution_clock::now();
+    auto durationParallel = std::chrono::duration_cast<std::chrono::milliseconds>(endParallel - startParallel);
+
+    unsigned int count;
+    cudaMemcpy(&count, d_count, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    float piParallel = 4.0f * static_cast<float>(count) / numIterations;
+
+    std::cout << "\nParallel method:\n";
+    std::cout << "PI = " << piParallel << std::endl;
+    std::cout << "Time taken: " << durationParallel.count() << " ms\n";
+
+    // Cleanup
+    cudaFree(d_count);
+    cudaFree(d_iterations);
+
+    return 0;
+}
